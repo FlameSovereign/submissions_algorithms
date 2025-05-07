@@ -34,10 +34,9 @@ jobs:
           script: |
             const fs     = require('fs').promises;
             const yaml   = require('js-yaml');
-            const core   = require('@actions/core');
+            // 注意：core 已由 actions/github-script 提供，不要再次 require
             const prBody = context.payload.pull_request.body || '';
 
-            // 使用 HTML 注释标记
             const startMarker = '<!--- Submission Info Start -->';
             const endMarker   = '<!--- Submission Info End -->';
 
@@ -53,13 +52,11 @@ jobs:
               return;
             }
 
-            // 提取两标记之间的内容
             const section = prBody
               .slice(contentStart, endIndex)
               .trim();
             console.log('Extracted YAML section:\n', section);
 
-            // 清洗注释并解析 YAML
             let data;
             try {
               const cleanYaml = section
@@ -70,16 +67,15 @@ jobs:
               data = yaml.load(cleanYaml);
             } catch (err) {
               await github.rest.issues.createComment({
-                owner:       context.repo.owner,
-                repo:        context.repo.repo,
+                owner:        context.repo.owner,
+                repo:         context.repo.repo,
                 issue_number: context.payload.pull_request.number,
-                body:        `:warning: Failed to parse submission YAML: ${err.message}`
+                body:         `:warning: Failed to parse submission YAML: ${err.message}`
               });
               core.setFailed(`Invalid YAML: ${err.message}`);
               return;
             }
 
-            // 必填字段校验
             const required = [
               'submission_name',
               'submission_folder',
@@ -111,7 +107,7 @@ jobs:
               return;
             }
 
-            // 如果之前打了 Incomplete 标签，删掉它
+            // 清除旧标签
             try {
               const { data: labels } = await github.rest.issues.listLabelsOnIssue({
                 owner:        context.repo.owner,
@@ -128,8 +124,9 @@ jobs:
               }
             } catch {}
 
-            // 生成 submissions/.../submission_info.yml
-            const folder = data.submission_folder.replace(/^\/+|\/+$/g, '')
+            // 写 submission_info.yml
+            const folder = data.submission_folder
+              .replace(/^\/+|\/+$/g, '')
               .replace(/^(external_tuning|self_tuning)\//, '');
             let subPath;
             if (data.ruleset === 'external') {
@@ -155,3 +152,4 @@ jobs:
                        -m "Automated commit by GitHub Action"
             git push
           fi
+
