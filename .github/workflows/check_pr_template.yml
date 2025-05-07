@@ -1,3 +1,4 @@
+
 name: Check if PR Template Is Complete
 
 on:
@@ -7,9 +8,11 @@ on:
 jobs:
   check_template:
     runs-on: ubuntu-latest
+
     permissions:
       contents: write
       pull-requests: write
+      issues: write    # ← 新增这一行，允许在 PR 下发表评论
 
     steps:
       - name: Checkout repository
@@ -34,7 +37,6 @@ jobs:
           script: |
             const fs     = require('fs').promises;
             const yaml   = require('js-yaml');
-            // 注意：core 已由 actions/github-script 提供，不要再次 require
             const prBody = context.payload.pull_request.body || '';
 
             const startMarker = '<!--- Submission Info Start -->';
@@ -52,10 +54,7 @@ jobs:
               return;
             }
 
-            const section = prBody
-              .slice(contentStart, endIndex)
-              .trim();
-            console.log('Extracted YAML section:\n', section);
+            const section = prBody.slice(contentStart, endIndex).trim();
 
             let data;
             try {
@@ -67,10 +66,10 @@ jobs:
               data = yaml.load(cleanYaml);
             } catch (err) {
               await github.rest.issues.createComment({
-                owner:        context.repo.owner,
-                repo:         context.repo.repo,
-                issue_number: context.payload.pull_request.number,
-                body:         `:warning: Failed to parse submission YAML: ${err.message}`
+                owner:         context.repo.owner,
+                repo:          context.repo.repo,
+                issue_number:  context.payload.pull_request.number,
+                body:          `:warning: Failed to parse submission YAML: ${err.message}`
               });
               core.setFailed(`Invalid YAML: ${err.message}`);
               return;
@@ -92,22 +91,22 @@ jobs:
             if (missing.length > 0) {
               const list = missing.map(f => `- ${f} is empty`).join('\n');
               await github.rest.issues.createComment({
-                owner:        context.repo.owner,
-                repo:         context.repo.repo,
-                issue_number: context.payload.pull_request.number,
-                body:         `:warning: Please fill out all required fields:\n${list}`
+                owner:         context.repo.owner,
+                repo:          context.repo.repo,
+                issue_number:  context.payload.pull_request.number,
+                body:          `:warning: Please fill out all required fields:\n${list}`
               });
               await github.rest.issues.addLabels({
-                owner:        context.repo.owner,
-                repo:         context.repo.repo,
-                issue_number: context.payload.pull_request.number,
-                labels:       ['🚧 Incomplete']
+                owner:         context.repo.owner,
+                repo:          context.repo.repo,
+                issue_number:  context.payload.pull_request.number,
+                labels:        ['🚧 Incomplete']
               });
               core.setFailed('Empty fields found');
               return;
             }
 
-            // 清除旧标签
+            // Remove old 🚧 Incomplete label if present
             try {
               const { data: labels } = await github.rest.issues.listLabelsOnIssue({
                 owner:        context.repo.owner,
@@ -124,7 +123,7 @@ jobs:
               }
             } catch {}
 
-            // 写 submission_info.yml
+            // Write submission_info.yml
             const folder = data.submission_folder
               .replace(/^\/+|\/+$/g, '')
               .replace(/^(external_tuning|self_tuning)\//, '');
@@ -137,7 +136,6 @@ jobs:
             await fs.mkdir(subPath, { recursive: true });
             const yamlStr = yaml.dump(data);
             await fs.writeFile(`${subPath}/submission_info.yml`, yamlStr);
-            console.log('Created', `${subPath}/submission_info.yml`);
 
             core.setOutput('filled_out', 'true');
             core.setOutput('submission_data', data);
@@ -152,4 +150,3 @@ jobs:
                        -m "Automated commit by GitHub Action"
             git push
           fi
-
