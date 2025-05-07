@@ -10,6 +10,7 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -29,61 +30,57 @@ jobs:
         id: check_template
         uses: actions/github-script@v6
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const fs = require('fs').promises;
-            const yaml = require('js-yaml');
+            const fs     = require('fs').promises;
+            const yaml   = require('js-yaml');
+            const core   = require('@actions/core');
             const prBody = context.payload.pull_request.body || '';
-            
-            // Normalize line endings
-            const normalizedBody = prBody.replace(/\r\n/g, '\n');
-            
-            // Extract and parse YAML
-            const startMarker = '```yaml\n';
-            const endMarker = '\n```';
-            
-            const startIndex = normalizedBody.indexOf(startMarker);
+
+            // 使用 HTML 注释标记
+            const startMarker = '<!--- Submission Info Start -->';
+            const endMarker   = '<!--- Submission Info End -->';
+
+            const startIndex = prBody.indexOf(startMarker);
             if (startIndex === -1) {
-              console.log('Could not find start marker');
               core.setFailed('Start marker not found');
               return;
             }
-            
             const contentStart = startIndex + startMarker.length;
-            const endIndex = normalizedBody.indexOf(endMarker, contentStart);
+            const endIndex     = prBody.indexOf(endMarker, contentStart);
             if (endIndex === -1) {
-              console.log('Could not find end marker');
               core.setFailed('End marker not found');
               return;
             }
-            
-            const yamlContent = normalizedBody.slice(contentStart, endIndex);
-            console.log('Extracted YAML content:', yamlContent);
-            
+
+            // 提取两标记之间的内容
+            const section = prBody
+              .slice(contentStart, endIndex)
+              .trim();
+            console.log('Extracted YAML section:\n', section);
+
+            // 清洗注释并解析 YAML
             let data;
             try {
-              // Remove comments from YAML content
-              const cleanYaml = yamlContent
+              const cleanYaml = section
                 .split('\n')
-                .map(line => line.split('#')[0].trim())
+                .map(line => line.replace(/#.*$/, '').trim())
+                .filter(line => line)
                 .join('\n');
-              
-              console.log('Cleaned YAML content:', cleanYaml);
               data = yaml.load(cleanYaml);
-              console.log('Parsed YAML data:', data);
-            } catch (error) {
-              console.log('YAML parsing error:', error);
+            } catch (err) {
               await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
+                owner:       context.repo.owner,
+                repo:        context.repo.repo,
                 issue_number: context.payload.pull_request.number,
-                body: `:warning: Error parsing YAML: ${error.message}`
+                body:        `:warning: Failed to parse submission YAML: ${err.message}`
               });
-              core.setFailed(`Invalid YAML: ${error.message}`);
+              core.setFailed(`Invalid YAML: ${err.message}`);
               return;
             }
-            
-            // Validate required fields
-            const requiredFields = [
+
+            // 必填字段校验
+            const required = [
               'submission_name',
               'submission_folder',
               'authors',
@@ -92,106 +89,69 @@ jobs:
               'framework',
               'description'
             ];
-            
-            const emptyFields = requiredFields.filter(field => {
-              const value = data?.[field];
-              return !value || 
-                     value.toString().trim() === '' || 
-                     value === '""' ||
-                     value === '\"\"';
+            const missing = required.filter(f => {
+              const v = data?.[f];
+              return !v || v.toString().trim() === '' || v === '""';
             });
-            
-            if (emptyFields.length > 0) {
-              const emptyFieldsList = emptyFields
-                .map(field => `  - ${field} is empty`)
-                .join('\n');
-              
+            if (missing.length > 0) {
+              const list = missing.map(f => `- ${f} is empty`).join('\n');
               await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
+                owner:        context.repo.owner,
+                repo:         context.repo.repo,
                 issue_number: context.payload.pull_request.number,
-                body: `:warning: Please fill out all required fields in the PR template:\n\n${emptyFieldsList}`
+                body:         `:warning: Please fill out all required fields:\n${list}`
               });
-              
               await github.rest.issues.addLabels({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
+                owner:        context.repo.owner,
+                repo:         context.repo.repo,
                 issue_number: context.payload.pull_request.number,
-                labels: ['🚧 Incomplete']
+                labels:       ['🚧 Incomplete']
               });
-              
               core.setFailed('Empty fields found');
               return;
             }
 
-            // Remove incomplete label if present
+            // 如果之前打了 Incomplete 标签，删掉它
             try {
               const { data: labels } = await github.rest.issues.listLabelsOnIssue({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
+                owner:        context.repo.owner,
+                repo:         context.repo.repo,
                 issue_number: context.payload.pull_request.number
               });
-              
-              if (labels.some(label => label.name === '🚧 Incomplete')) {
+              if (labels.some(l => l.name === '🚧 Incomplete')) {
                 await github.rest.issues.removeLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
+                  owner:        context.repo.owner,
+                  repo:         context.repo.repo,
                   issue_number: context.payload.pull_request.number,
-                  name: '🚧 Incomplete'
+                  name:         '🚧 Incomplete'
                 });
               }
-            } catch (error) {
-              console.log('Error handling labels:', error);
+            } catch {}
+
+            // 生成 submissions/.../submission_info.yml
+            const folder = data.submission_folder.replace(/^\/+|\/+$/g, '')
+              .replace(/^(external_tuning|self_tuning)\//, '');
+            let subPath;
+            if (data.ruleset === 'external') {
+              subPath = `submissions/external_tuning/${folder}`;
+            } else {
+              subPath = `submissions/self_tuning/${folder}`;
             }
-            
+            await fs.mkdir(subPath, { recursive: true });
+            const yamlStr = yaml.dump(data);
+            await fs.writeFile(`${subPath}/submission_info.yml`, yamlStr);
+            console.log('Created', `${subPath}/submission_info.yml`);
+
             core.setOutput('filled_out', 'true');
             core.setOutput('submission_data', data);
-            
-            // Create submission_info.yml
-            try {
-              let submissionPath;
-              // Remove any leading/trailing slashes and potential duplicate paths
-              const cleanFolder = data.submission_folder.replace(/^\/+|\/+$/g, '').replace(/^(external_tuning|self_tuning)\//, '');
-              
-              if (data.ruleset === 'external') {
-                submissionPath = `submissions/external_tuning/${cleanFolder}`;
-              } else if (data.ruleset === 'self-tuning') {
-                submissionPath = `submissions/self_tuning/${cleanFolder}`;
-              } else {
-                core.setFailed(`Invalid ruleset value: ${data.ruleset}. Must be "external" or "self-tuning".`);
-                return;
-              }
-              
-              // Check if directory exists, create if it doesn't
-              try {
-                await fs.mkdir(submissionPath, { recursive: true });
-              } catch (error) {
-                console.log('Error creating directory:', error);
-                core.setFailed(`Failed to create directory: ${error.message}`);
-                return;
-              }
-              
-              // Write the YAML file
-              const yamlStr = yaml.dump(data);
-              const filePath = `${submissionPath}/submission_info.yml`;
-              await fs.writeFile(filePath, yamlStr);
-              
-              console.log('Created submission_info.yml');
-              
-            } catch (error) {
-              console.log('Error creating submission file:', error);
-              core.setFailed(`Failed to create submission file: ${error.message}`);
-              return;
-            }
 
       - name: Commit and push if changed
         run: |
           git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add submissions/*/*/*
-          
-          # Check if there are changes to commit
-          git diff --staged --quiet || (
-            git commit -m "Add/Update submission_info.yml" -m "Automated commit by GitHub Action"
+          git config --local user.name  "GitHub Action"
+          git add submissions/**/submission_info.yml
+          if ! git diff --staged --quiet; then
+            git commit -m "Add/Update submission_info.yml" \
+                       -m "Automated commit by GitHub Action"
             git push
-          )
+          fi
